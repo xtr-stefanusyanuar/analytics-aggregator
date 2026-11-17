@@ -74,9 +74,137 @@ The codebase is strictly organized following Ports and Adapters to ensure the co
 │       ├── repository/       # Driven Adapters (Right Side): Concrete database logic and Unit of Work (UoW) implementation.
 │       └── db/               # Infrastructure setup: PostgreSQL connection pooling and configuration.
 │
+├── db/
+│   ├── migrations/           # SQL schema (run 001_init.up.sql once to create the tables).
+│   └── queries/              # SQL queries compiled by sqlc into internal/adapter/repository/sqlc.
+│
+├── api-collection/           # Bruno collection for sending test events.
+├── .env.example              # Template for your local .env file.
 ├── go.mod
 └── go.sum
 ```
+
+## Getting Started (Local, without Docker)
+
+You only need Go, PostgreSQL and (optionally) pgAdmin 4. Docker is **not** required; `docker-compose.yaml` is just an alternative.
+
+### 1. Prerequisites
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| [Go](https://go.dev/dl/) | 1.24+ | Check with `go version`. |
+| [PostgreSQL](https://www.postgresql.org/download/) | 16 recommended | The Windows/macOS installers can also install pgAdmin 4. Remember the password you set for the `postgres` superuser. |
+| [pgAdmin 4](https://www.pgadmin.org/download/) | any | Optional GUI for managing the database. |
+
+Make sure the PostgreSQL service is running (Windows: *Services → postgresql-x64-16*; macOS: `brew services start postgresql@16`; Linux: `sudo systemctl start postgresql`).
+
+### 2. Create the database
+
+Create a login role `analytics` and a database `analytics_aggregator` owned by it. Pick **one** of the two options.
+
+**Option A: pgAdmin 4**
+
+1. Open pgAdmin 4 and connect to your local server (`localhost`, port `5432`, user `postgres`).
+2. Right-click **Login/Group Roles → Create → Login/Group Role…**
+   - *General* tab → Name: `analytics`
+   - *Definition* tab → Password: `analytics` (or your own)
+   - *Privileges* tab → enable **Can login?**
+   - Save.
+3. Right-click **Databases → Create → Database…**
+   - Database: `analytics_aggregator`, Owner: `analytics` → Save.
+4. Select the new `analytics_aggregator` database, open **Tools → Query Tool**, use **Open File** to load [`db/migrations/001_init.up.sql`](./db/migrations/001_init.up.sql), and press **Execute (F5)**.
+5. Refresh **Schemas → public → Tables**. You should see `events` and `dead_letter_events`.
+
+> The tables must be created while connected as `analytics` (or granted to it). If you ran the script as `postgres`, run this in the Query Tool:
+> `GRANT ALL ON ALL TABLES IN SCHEMA public TO analytics;`
+
+**Option B: `psql` command line**
+
+```bash
+psql -U postgres -h localhost -c "CREATE ROLE analytics WITH LOGIN PASSWORD 'analytics';"
+psql -U postgres -h localhost -c "CREATE DATABASE analytics_aggregator OWNER analytics;"
+psql -U analytics -h localhost -d analytics_aggregator -f db/migrations/001_init.up.sql
+```
+
+To reset the schema, run [`db/migrations/001_init.down.sql`](./db/migrations/001_init.down.sql) and then the `up` script again.
+
+### 3. Configure `.env`
+
+The app reads its configuration from a `.env` file in the **directory you run it from** (loaded with [`godotenv`](https://github.com/joho/godotenv) in [`internal/config/config.go`](./internal/config/config.go)). Variables already set in the OS environment take priority over the file, and any missing key falls back to its default.
+
+`.env` is gitignored, so create yours from the template:
+
+```bash
+cp .env.example .env            # macOS / Linux / Git Bash
+Copy-Item .env.example .env     # Windows PowerShell
+```
+
+Then update `DATABASE_URL` to match the role, password, host and port you used in step 2:
+
+```dotenv
+SERVER_PORT=8081
+DATABASE_URL=postgres://analytics:analytics@localhost:5432/analytics_aggregator?sslmode=disable
+```
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SERVER_PORT` | `8081` | HTTP port the API listens on. |
+| `APP_ENV` | `development` | Application environment. |
+| `DATABASE_URL` | `postgres://localhost:5432/analytics_aggregator` | PostgreSQL connection string. URL-encode special characters in the password (e.g. `@` → `%40`). |
+| `DB_MAX_CONNS` / `DB_MIN_CONNS` | `10` / `5` | Connection pool size. |
+| `DB_MAX_IDLE_TIME` / `DB_MAX_LIFE_TIME` | `300` / `1800` | Pool connection idle and max lifetime, in seconds. |
+| `DB_HEALTH_CHECK_PERIOD` | `60` | Pool health check interval, in seconds. |
+| `PAGING_LIMIT_DEFAULT` / `PAGING_LIMIT_MAX` | `10` / `100` | Default and maximum page size. |
+| `GEO_API_BASE_URL` | `http://ip-api.com` | Base URL of the IP enrichment API. |
+| `ENRICHER_WORKER_SIZE` | `2` | Number of concurrent enricher workers. |
+| `INSERT_BATCH_SIZE` | `5` | Events per database batch insert. |
+| `PIPELINE_JOB_SIZE` | `50` | Pipeline channel buffer size. |
+| `BACKOFF_MULTIPLIER` | `SECOND` | Retry backoff unit: `SECOND`, `MINUTE`, or anything else for milliseconds. |
+
+> If the log shows `No .env file found, using system environment variables`, you are running the app from a directory that does not contain `.env`. Run it from the project root.
+
+### 4. Run the API
+
+From the project root:
+
+```bash
+go mod download
+go run ./cmd/api
+```
+
+### 5. Send a test event
+
+```bash
+curl -X POST http://localhost:8081/event \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"usr_12345","event_type":"checkout_completed","client_ip":"192.168.1.55","payload":{"cart_value":151.50,"currency":"USD","items":3}}'
+```
+
+PowerShell:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8081/event -ContentType "application/json" `
+  -Body '{"user_id":"usr_12345","event_type":"checkout_completed","client_ip":"192.168.1.55","payload":{"cart_value":151.50,"currency":"USD","items":3}}'
+```
+
+You can also open [`api-collection/`](./api-collection) in [Bruno](https://www.usebruno.com/) and use the `local` environment.
+
+The API returns `202 Accepted`. After the batch is flushed, check the results in pgAdmin (right-click `events` → **View/Edit Data → All Rows**) or with:
+
+```sql
+SELECT * FROM events ORDER BY created_at DESC;
+SELECT * FROM dead_letter_events ORDER BY failed_at DESC;
+```
+
+### Alternative: Docker
+
+If you prefer Docker, `docker compose up -d` starts PostgreSQL 16 with the schema already applied. It listens on host port **5433**, so set:
+
+```dotenv
+DATABASE_URL=postgres://analytics:analytics@localhost:5433/analytics_aggregator?sslmode=disable
+```
+
+You can still connect pgAdmin 4 to it at `localhost:5433`.
 
 ## Development & Contributing
 
