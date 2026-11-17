@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 )
 
@@ -37,6 +39,14 @@ func (h *Handler) ProcessAndStoreEvents(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return InternalError("pipeline ingestion failed", err)
 	}
+
+	eventsAcceptedTotal.Inc()
+	// Log only IDs and low-risk fields; never log PII (user_id, client_ip) or the raw payload.
+	slog.InfoContext(r.Context(), "event accepted",
+		slog.String("event_id", event.ID.String()),
+		slog.String("event_type", processEventReq.EventType),
+		slog.String("request_id", middleware.GetReqID(r.Context())),
+	)
 
 	resp := ProcessEventResponse{
 		Status:  "accepted",

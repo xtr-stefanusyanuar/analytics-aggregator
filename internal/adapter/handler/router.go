@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func NewRouter(ps *service.PipelineService, cfg *config.Config) http.Handler {
@@ -21,6 +22,9 @@ func NewRouter(ps *service.PipelineService, cfg *config.Config) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+
+	// Prometheus scrape endpoint
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/event", func(r chi.Router) {
 		h := NewHandler(ps, cfg)
